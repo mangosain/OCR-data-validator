@@ -49,6 +49,7 @@ export default function App() {
   // UI States
   const [viewMode, setViewMode] = useState("Word Level");
   const [groupByFolder, setGroupByFolder] = useState(false);
+  const [autoFillPred, setAutoFillPred] = useState(false);
   const [currentPage, setCurrentPage] = useState(0);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
 
@@ -98,10 +99,10 @@ export default function App() {
     if (workspaceId) {
       localStorage.setItem(
         `ocr_state_${workspaceId}`,
-        JSON.stringify({ exportList, corrections, page: currentPage })
+        JSON.stringify({ exportList, corrections, page: currentPage, autoFillPred })
       );
     }
-  }, [exportList, corrections, currentPage, workspaceId]);
+  }, [exportList, corrections, currentPage, autoFillPred, workspaceId]);
 
   // --- CORE DATASET PROCESSOR ---
   const processWorkspace = async (sourceFile, pathMap, nameMap, isHandle, dirHandle = null) => {
@@ -204,15 +205,18 @@ export default function App() {
           setExportList(parsed.exportList || {});
           setCorrections(parsed.corrections || {});
           setCurrentPage(parsed.page || 0);
+          setAutoFillPred(parsed.autoFillPred || false);
         } catch (e) {
           setExportList({});
           setCorrections({});
           setCurrentPage(0);
+          setAutoFillPred(false);
         }
       } else {
         setExportList({});
         setCorrections({});
         setCurrentPage(0);
+        setAutoFillPred(false);
       }
 
       setDataset(parsedData);
@@ -435,6 +439,23 @@ export default function App() {
     };
   }, [dataset, currentPage, groupByFolder, viewMode, uniqueFolders]);
 
+  // --- AUTO-FILL PREDICTIONS (LAZY/PAGE-BASED) ---
+  useEffect(() => {
+    if (autoFillPred && paginatedData.length > 0) {
+      setCorrections((prev) => {
+        let hasChanges = false;
+        const next = { ...prev };
+        paginatedData.forEach((item) => {
+          if (next[item.id] === undefined) {
+            next[item.id] = item.pred;
+            hasChanges = true;
+          }
+        });
+        return hasChanges ? next : prev;
+      });
+    }
+  }, [autoFillPred, paginatedData]);
+
   // --- INSTANT LAZY LOAD IMAGE FETCHING ---
   useEffect(() => {
     let isActive = true;
@@ -501,6 +522,7 @@ export default function App() {
       setExportList({});
       setCorrections({});
       setCurrentPage(0);
+      setAutoFillPred(false);
     }
   };
 
@@ -544,7 +566,7 @@ export default function App() {
           name: item.Image,
           gt: item.GT,
           pred: item.Pred,
-          corrected: corrections[id] || "",
+          corrected: corrections[id] !== undefined ? corrections[id] : "",
           path: item.Path,
           source: item.OriginalFile,
         });
@@ -671,11 +693,9 @@ export default function App() {
           <div className="p-6 border-b border-slate-100 bg-slate-50/50 flex justify-between items-start">
             <div>
               <h1 className="text-xl font-bold flex items-center gap-2 text-slate-800">
-                OCR Data Validator
+                OCR Validator
               </h1>
-              <p className="text-xs text-slate-500 mt-1 flex items-center gap-1">
-                <Zap className="w-3 h-3 text-yellow-500" />
-              </p>
+              
             </div>
             <button
               onClick={() => setIsSidebarOpen(false)}
@@ -690,7 +710,7 @@ export default function App() {
             {/* Section: Import */}
             <div className="space-y-3">
               <h2 className="text-xs font-bold text-slate-400">
-                Source File:{" "}
+                Source:{" "}
                 {workspaceId ? (
                   <span className="text-green-600">
                     {originalFileName || "Dataset Loaded"}
@@ -740,6 +760,20 @@ export default function App() {
                     {mode}
                   </button>
                 ))}
+              </div>
+
+              <div className="space-y-3 mt-4">
+                <label className="flex items-center gap-3 p-3 border border-slate-200 rounded-xl hover:bg-slate-50 cursor-pointer transition-colors">
+                  <input
+                    type="checkbox"
+                    checked={autoFillPred}
+                    onChange={(e) => setAutoFillPred(e.target.checked)}
+                    className="w-4 h-4 text-blue-600 rounded border-slate-300 focus:ring-blue-500"
+                  />
+                  <span className="text-sm font-medium">
+                    Auto-fill with Predictions
+                  </span>
+                </label>
               </div>
 
               {uniqueFolders.length > 1 && (
@@ -994,7 +1028,7 @@ export default function App() {
                           <input
                             type="text"
                             placeholder="Type correction here..."
-                            value={corrections[item.id] || ""}
+                            value={corrections[item.id] !== undefined ? corrections[item.id] : ""}
                             onChange={(e) =>
                               updateCorrection(item.id, e.target.value)
                             }
