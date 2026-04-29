@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   FolderSearch,
   Upload,
@@ -15,9 +15,10 @@ import {
   Menu,
   X,
   Loader2,
+  Zap
 } from "lucide-react";
 
-// Helper for Smart Caching: Generates a unique SHA-256 hash based on file contents
+// Helper for Smart Caching
 const generateHash = async (message) => {
   const msgBuffer = new TextEncoder().encode(message);
   const hashBuffer = await crypto.subtle.digest("SHA-256", msgBuffer);
@@ -31,10 +32,19 @@ export default function App() {
   const [isImporting, setIsImporting] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [workspaceId, setWorkspaceId] = useState(null);
-  const [fileHandlesMap, setFileHandlesMap] = useState(new Map());
+  
+  // Fast API Handle
+  const [workspaceDirHandle, setWorkspaceDirHandle] = useState(null);
+  const dirCacheRef = useRef(new Map());
+  const fileHandleCacheRef = useRef(new Map());
+  
+  // Legacy Fallback Map
+  const [fileHandlesMap, setFileHandlesMap] = useState({ pathMap: new Map(), nameMap: new Map(), isHandle: false });
+  
   const [dataset, setDataset] = useState([]);
   const [visibleUrls, setVisibleUrls] = useState({});
   const [originalFileName, setOriginalFileName] = useState("");
+  const [supportsFileSystemAccess, setSupportsFileSystemAccess] = useState(false);
 
   // UI States
   const [viewMode, setViewMode] = useState("Word Level");
@@ -46,115 +56,73 @@ export default function App() {
   const [exportList, setExportList] = useState({});
   const [corrections, setCorrections] = useState({});
 
-  // Handle window resizing to automatically adjust sidebar visibility on mobile vs desktop
   useEffect(() => {
+    const isSupported = typeof window !== 'undefined' && 'showDirectoryPicker' in window;
+    let isCrossOriginIframe = false;
+    try {
+        if (window.self !== window.top) {
+            const topHref = window.top.location.href; // eslint-disable-line no-unused-vars
+        }
+    } catch (e) {
+        isCrossOriginIframe = true;
+    }
+    setSupportsFileSystemAccess(isSupported && !isCrossOriginIframe);
+
     const handleResize = () => {
-      if (window.innerWidth < 1024) {
-        setIsSidebarOpen(false);
-      } else {
-        setIsSidebarOpen(true);
-      }
+      if (window.innerWidth < 1024) setIsSidebarOpen(false);
+      else setIsSidebarOpen(true);
     };
-    // Initialize
     handleResize();
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
-  // --- DYNAMIC SCRIPT LOADING FOR EXCEL ---
   useEffect(() => {
     if (!document.getElementById("exceljs-script")) {
       const script = document.createElement("script");
       script.id = "exceljs-script";
-      script.src =
-        "https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js";
+      script.src = "https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js";
       script.async = true;
       document.head.appendChild(script);
     }
     if (!document.getElementById("xlsx-script")) {
       const scriptXlsx = document.createElement("script");
       scriptXlsx.id = "xlsx-script";
-      scriptXlsx.src =
-        "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+      scriptXlsx.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
       scriptXlsx.async = true;
       document.head.appendChild(scriptXlsx);
     }
   }, []);
 
-  // --- LOCAL STORAGE SYNC (SMART CACHING) ---
   useEffect(() => {
     if (workspaceId) {
       localStorage.setItem(
         `ocr_state_${workspaceId}`,
-        JSON.stringify({
-          exportList,
-          corrections,
-          page: currentPage,
-        }),
+        JSON.stringify({ exportList, corrections, page: currentPage })
       );
     }
   }, [exportList, corrections, currentPage, workspaceId]);
 
-  // --- HTML5 DIRECTORY UPLOAD LOGIC ---
-  const handleFolderUpload = async (e) => {
-    const files = Array.from(e.target.files);
-    if (files.length === 0) return;
-
-    setIsScanning(true);
-
+  // --- CORE DATASET PROCESSOR ---
+  const processWorkspace = async (sourceFile, pathMap, nameMap, isHandle, dirHandle = null) => {
     try {
-      const fileMap = new Map();
-      let sourceFile = null;
-
-      for (const file of files) {
-        const normalizedPath = file.webkitRelativePath
-          .replace(/\\/g, "/")
-          .toLowerCase();
-
-        if (
-          file.name.endsWith(".tsv") ||
-          file.name.endsWith(".txt") ||
-          file.name.endsWith(".json")
-        ) {
-          if (!sourceFile) sourceFile = file;
-          fileMap.set(normalizedPath, file);
-        } else {
-          fileMap.set(normalizedPath, file);
-        }
-      }
-
-      if (!sourceFile) {
-        alert(
-          "No suitable source file (.tsv, .txt, .json) found in the selected directory.",
-        );
-        setIsScanning(false);
-        e.target.value = null;
-        return;
-      }
-
       const sourceText = await sourceFile.text();
       const sourceFileName = sourceFile.name;
-
       const fileHash = await generateHash(sourceText);
 
-      setFileHandlesMap(fileMap);
+      setFileHandlesMap({ pathMap, nameMap, isHandle });
+      setWorkspaceDirHandle(dirHandle);
       setOriginalFileName(sourceFileName);
 
       const getFolderId = (imgPath) => {
         if (imgPath.includes("/") || imgPath.includes("\\")) {
           const pathParts = imgPath.replace(/\\/g, "/").split("/");
-          return pathParts.length > 1
-            ? pathParts[pathParts.length - 2]
-            : "Root";
+          return pathParts.length > 1 ? pathParts[pathParts.length - 2] : "Root";
         }
-        const target = imgPath.toLowerCase();
-        for (const key of fileMap.keys()) {
-          if (key.endsWith("/" + target) || key === target) {
-            const pathParts = key.split("/");
-            return pathParts.length > 1
-              ? pathParts[pathParts.length - 2]
-              : "Root";
-          }
+        if (nameMap && nameMap.size > 0) {
+          const target = imgPath.toLowerCase();
+          const match = nameMap.get(target);
+          return match ? match.folder : "Root";
         }
         return "Root";
       };
@@ -162,34 +130,58 @@ export default function App() {
       const parsedData = [];
 
       if (sourceFileName.toLowerCase().endsWith(".json")) {
-        try {
-          const rawData = JSON.parse(sourceText);
-          rawData.forEach((item) => {
-            const imgPath = item.image_path?.trim();
-            if (imgPath) {
-              parsedData.push({
-                originalPath: imgPath,
-                gt: item.gt?.toString().trim() || "",
-                pred: item.pred?.toString().trim() || "",
-                folderId: getFolderId(imgPath),
-                id: imgPath,
-              });
-            }
-          });
-        } catch (e) {
-          console.error("JSON parsing error:", e);
-          alert(
-            "Invalid JSON format. Please ensure it is a valid array of objects.",
-          );
-          setIsScanning(false);
-          e.target.value = null;
-          return;
-        }
+        const rawData = JSON.parse(sourceText);
+        rawData.forEach((item) => {
+          const rawPath = item.image_path || item.image || item.filename || item.file || item.Path || item.Image;
+          const imgPath = rawPath?.toString().trim();
+          const gtText = item.gt || item.ground_truth || item.label || item.text || item.GT || "";
+          const predText = item.pred || item.prediction || item.predicted || item.Pred || "";
+          
+          if (imgPath) {
+            parsedData.push({
+              originalPath: imgPath,
+              gt: gtText.toString().trim(),
+              pred: predText.toString().trim(),
+              folderId: getFolderId(imgPath),
+              id: imgPath,
+            });
+          }
+        });
       } else {
+        const isCsv = sourceFileName.toLowerCase().endsWith(".csv");
+        const delimiter = isCsv ? "," : "\t";
+        
+        const parseRow = (str, delim) => {
+          const arr = [];
+          let quote = false;
+          let col = '', c;
+          for (let i = 0; i < str.length; i++) {
+            c = str[i];
+            if (!quote && c === '"') { quote = true; continue; }
+            if (c === '"' && str[i+1] === '"') { col += '"'; i++; continue; }
+            if (quote && c === '"') { quote = false; continue; }
+            if (!quote && c === delim) { arr.push(col); col = ''; continue; }
+            col += c;
+          }
+          arr.push(col);
+          return arr;
+        };
+
         const lines = sourceText.split(/\r?\n/);
+        let isFirstRow = true;
+
         lines.forEach((line) => {
           if (!line.trim()) return;
-          const parts = line.split("\t");
+          const parts = parseRow(line, delimiter);
+          
+          if (isFirstRow) {
+            isFirstRow = false;
+            const firstCol = parts[0]?.toLowerCase() || "";
+            if (firstCol.includes("image") || firstCol.includes("path") || firstCol.includes("file")) {
+              return; 
+            }
+          }
+
           const imgPath = parts[0]?.trim();
           if (imgPath) {
             parsedData.push({
@@ -203,6 +195,8 @@ export default function App() {
         });
       }
 
+      await new Promise(resolve => setTimeout(resolve, 0));
+
       const savedData = localStorage.getItem(`ocr_state_${fileHash}`);
       if (savedData) {
         try {
@@ -211,7 +205,6 @@ export default function App() {
           setCorrections(parsed.corrections || {});
           setCurrentPage(parsed.page || 0);
         } catch (e) {
-          console.error("Failed to parse local storage", e);
           setExportList({});
           setCorrections({});
           setCurrentPage(0);
@@ -225,17 +218,184 @@ export default function App() {
       setDataset(parsedData);
       setWorkspaceId(fileHash);
       
-      // Auto-close sidebar on mobile after successful load
       if (window.innerWidth < 1024) setIsSidebarOpen(false);
 
     } catch (err) {
-      console.error("Error processing directory:", err);
-      alert("An error occurred while reading the folder.");
+      console.error("Data Processing Error:", err);
+      alert("Invalid format or an error occurred while parsing the source file.");
+    } finally {
+      setIsScanning(false);
+    }
+  };
+
+  // --- MODERN INSTANT LAZY-LOAD (O(1) Directory Selection) ---
+  const handleFastDirectorySelect = async () => {
+    try {
+      const dirHandle = await window.showDirectoryPicker({ mode: 'read' });
+      
+      setIsScanning(true);
+      await new Promise(resolve => setTimeout(resolve, 50)); 
+      
+      dirCacheRef.current.clear();
+      fileHandleCacheRef.current.clear();
+
+      let sourceFile = null;
+
+      const dirsToSearch = [dirHandle];
+      while (dirsToSearch.length > 0 && !sourceFile) {
+        const currentDir = dirsToSearch.shift();
+        for await (const entry of currentDir.values()) {
+          const lowerName = entry.name.toLowerCase();
+          if (entry.kind === 'file' && (lowerName.endsWith('.tsv') || lowerName.endsWith('.csv') || lowerName.endsWith('.txt') || lowerName.endsWith('.json'))) {
+            sourceFile = await entry.getFile();
+            break; 
+          } else if (entry.kind === 'directory') {
+            dirsToSearch.push(entry);
+          }
+        }
+      }
+
+      if (!sourceFile) {
+        alert("No suitable source file (.tsv, .txt, .json, .csv) found in the selected directory.");
+        setIsScanning(false);
+        return;
+      }
+
+      await processWorkspace(sourceFile, null, null, true, dirHandle); 
+    } catch (e) {
+      setIsScanning(false); 
+      if (e.name === 'SecurityError' || e.name === 'NotAllowedError') {
+          console.warn("Directory picker restricted. Reverting to legacy upload.");
+          setSupportsFileSystemAccess(false);
+          alert("Directory picker is restricted by your browser. Please try selecting the folder again using the fallback picker.");
+      } else if (e.name !== 'AbortError') {
+          console.error(e);
+      }
+    }
+  };
+
+  // --- LEGACY UPLOAD FALLBACK W/ TIME-SLICING ---
+  const handleLegacyUpload = async (e) => {
+    const fileList = e.target.files;
+    if (!fileList || fileList.length === 0) return;
+    
+    setIsScanning(true);
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    const pathMap = new Map();
+    const nameMap = new Map();
+    let sourceFile = null;
+
+    const CHUNK_SIZE = 2500;
+    const numFiles = fileList.length;
+
+    try {
+      for (let i = 0; i < numFiles; i += CHUNK_SIZE) {
+        const end = Math.min(i + CHUNK_SIZE, numFiles);
+        for (let j = i; j < end; j++) {
+          const file = fileList[j];
+          const normalizedPath = file.webkitRelativePath.replace(/\\/g, "/").toLowerCase();
+          const lowerName = file.name.toLowerCase();
+
+          if (!sourceFile && (lowerName.endsWith(".tsv") || lowerName.endsWith(".txt") || lowerName.endsWith(".json") || lowerName.endsWith(".csv"))) {
+            sourceFile = file; 
+          } 
+          
+          pathMap.set(normalizedPath, file);
+          const parts = normalizedPath.split('/');
+          const folder = parts.length > 1 ? parts[parts.length - 2] : 'Root';
+
+          if (!nameMap.has(lowerName)) {
+            nameMap.set(lowerName, { data: file, folder });
+          }
+        }
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+
+      if (!sourceFile) {
+        alert("No suitable source file (.tsv, .txt, .json, .csv) found in the selected directory.");
+        setIsScanning(false);
+        e.target.value = null;
+        return;
+      }
+
+      await processWorkspace(sourceFile, pathMap, nameMap, false);
+    } catch (err) {
+      console.error("Legacy Upload Error:", err);
+      setIsScanning(false);
     }
 
-    setIsScanning(false);
     e.target.value = null;
   };
+
+  // --- CORE HELPER: ON-DEMAND PATH RESOLUTION ---
+  const getFileBlobOnDemand = async (itemPath) => {
+    if (workspaceDirHandle) {
+      try {
+        const target = itemPath.replace(/\\/g, "/").replace(/^\.?\//, "").toLowerCase();
+        
+        if (fileHandleCacheRef.current.has(target)) {
+          return await fileHandleCacheRef.current.get(target).getFile();
+        }
+
+        const parts = target.split('/').filter(p => p);
+        
+        if (parts.length > 0 && parts[0] === workspaceDirHandle.name.toLowerCase()) {
+            parts.shift(); 
+        }
+
+        let currentHandle = workspaceDirHandle;
+        let currentPathAcc = "";
+
+        for (let i = 0; i < parts.length - 1; i++) {
+            currentPathAcc += (currentPathAcc ? "/" : "") + parts[i];
+            if (dirCacheRef.current.has(currentPathAcc)) {
+                currentHandle = dirCacheRef.current.get(currentPathAcc);
+            } else {
+                currentHandle = await currentHandle.getDirectoryHandle(parts[i]);
+                dirCacheRef.current.set(currentPathAcc, currentHandle);
+            }
+        }
+        
+        const fileHandle = await currentHandle.getFileHandle(parts[parts.length - 1]);
+        fileHandleCacheRef.current.set(target, fileHandle);
+        return await fileHandle.getFile();
+        
+      } catch (directErr) {
+        try {
+          const filename = itemPath.split("/").pop().toLowerCase();
+          const dirsToSearch = [workspaceDirHandle];
+          while (dirsToSearch.length > 0) {
+            const currentDir = dirsToSearch.shift();
+            for await (const entry of currentDir.values()) {
+              if (entry.kind === 'file' && entry.name.toLowerCase() === filename) {
+                fileHandleCacheRef.current.set(itemPath.replace(/\\/g, "/").replace(/^\.?\//, "").toLowerCase(), entry);
+                return await entry.getFile();
+              } else if (entry.kind === 'directory') {
+                dirsToSearch.push(entry);
+              }
+            }
+          }
+        } catch (bfsErr) {
+          return null; 
+        }
+      }
+    } else {
+      let target = itemPath.replace(/\\/g, "/").replace(/^\.?\//, "").toLowerCase();
+      const filename = target.split("/").pop();
+
+      let matchedData = fileHandlesMap.pathMap?.get(target);
+      if (!matchedData) {
+        const match = fileHandlesMap.nameMap?.get(filename);
+        if (match) matchedData = match.data;
+      }
+      if (matchedData) {
+        return fileHandlesMap.isHandle ? await matchedData.getFile() : matchedData;
+      }
+    }
+    return null;
+  };
+
 
   // --- PAGINATION & GROUPING LOGIC ---
   const uniqueFolders = useMemo(() => {
@@ -275,7 +435,7 @@ export default function App() {
     };
   }, [dataset, currentPage, groupByFolder, viewMode, uniqueFolders]);
 
-  // --- DYNAMIC IMAGE URL GENERATION (Memory Optimization) ---
+  // --- INSTANT LAZY LOAD IMAGE FETCHING ---
   useEffect(() => {
     let isActive = true;
     const objectUrls = [];
@@ -283,42 +443,24 @@ export default function App() {
     const loadImages = async () => {
       const newUrls = {};
 
-      for (const item of paginatedData) {
-        let target = item.originalPath
-          .replace(/\\/g, "/")
-          .replace(/^\.?\//, "")
-          .toLowerCase();
-        let matchedFile = fileHandlesMap.get(target);
+      await Promise.all(paginatedData.map(async (item) => {
+        const fileBlob = await getFileBlobOnDemand(item.originalPath);
 
-        if (!matchedFile) {
-          for (const [key, file] of fileHandlesMap.entries()) {
-            if (key.endsWith("/" + target) || key === target) {
-              matchedFile = file;
-              break;
+        if (isActive) {
+          if (fileBlob) {
+            try {
+              const url = URL.createObjectURL(fileBlob);
+              newUrls[item.id] = url;
+              objectUrls.push(url);
+            } catch (e) {
+              console.error("Failed to map file URL:", item.originalPath);
+              newUrls[item.id] = null; 
             }
+          } else {
+            newUrls[item.id] = null; 
           }
         }
-
-        if (!matchedFile) {
-          const filename = target.split("/").pop();
-          for (const [key, file] of fileHandlesMap.entries()) {
-            if (key.endsWith("/" + filename) || key === filename) {
-              matchedFile = file;
-              break;
-            }
-          }
-        }
-
-        if (matchedFile) {
-          try {
-            const url = URL.createObjectURL(matchedFile);
-            newUrls[item.id] = url;
-            objectUrls.push(url);
-          } catch (e) {
-            console.error("Failed to load file:", item.originalPath);
-          }
-        }
-      }
+      }));
 
       if (isActive) setVisibleUrls(newUrls);
     };
@@ -329,7 +471,7 @@ export default function App() {
       isActive = false;
       objectUrls.forEach((url) => URL.revokeObjectURL(url));
     };
-  }, [paginatedData, fileHandlesMap]);
+  }, [paginatedData, workspaceDirHandle, fileHandlesMap]); 
 
   // --- INTERACTION HANDLERS ---
   const toggleFlag = (item) => {
@@ -355,11 +497,7 @@ export default function App() {
   };
 
   const handleClearData = () => {
-    if (
-      window.confirm(
-        "Are you sure you want to clear all saved progress for this specific dataset? This cannot be undone.",
-      )
-    ) {
+    if (window.confirm("Are you sure you want to clear all saved progress for this specific dataset? This cannot be undone.")) {
       setExportList({});
       setCorrections({});
       setCurrentPage(0);
@@ -375,9 +513,7 @@ export default function App() {
     }
 
     if (!window.ExcelJS) {
-      alert(
-        "Excel processing library is still loading. Please try again in a few seconds.",
-      );
+      alert("Excel processing library is still loading. Please try again in a few seconds.");
       return;
     }
 
@@ -415,39 +551,13 @@ export default function App() {
 
         worksheet.getRow(rowIndex).height = 60;
 
-        let target = item.Path.replace(/\\/g, "/")
-          .replace(/^\.?\//, "")
-          .toLowerCase();
-        let matchedFile = fileHandlesMap.get(target);
+        const fileBlob = await getFileBlobOnDemand(item.Path);
 
-        if (!matchedFile) {
-          for (const [key, file] of fileHandlesMap.entries()) {
-            if (key.endsWith("/" + target) || key === target) {
-              matchedFile = file;
-              break;
-            }
-          }
-        }
-
-        if (!matchedFile) {
-          const filename = target.split("/").pop();
-          for (const [key, file] of fileHandlesMap.entries()) {
-            if (key.endsWith("/" + filename) || key === filename) {
-              matchedFile = file;
-              break;
-            }
-          }
-        }
-
-        if (matchedFile) {
+        if (fileBlob) {
           try {
-            const arrayBuffer = await matchedFile.arrayBuffer();
-            const ext = matchedFile.name.split(".").pop().toLowerCase();
-            const validExt = ["jpeg", "png", "gif"].includes(ext)
-              ? ext
-              : ext === "jpg"
-                ? "jpeg"
-                : "png";
+            const arrayBuffer = await fileBlob.arrayBuffer();
+            const ext = fileBlob.name.split(".").pop().toLowerCase();
+            const validExt = ["jpeg", "png", "gif"].includes(ext) ? ext : ext === "jpg" ? "jpeg" : "png";
 
             const imageId = workbook.addImage({
               buffer: arrayBuffer,
@@ -467,9 +577,7 @@ export default function App() {
       }
 
       const buffer = await workbook.xlsx.writeBuffer();
-      const blob = new Blob([buffer], {
-        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      });
+      const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
@@ -491,9 +599,7 @@ export default function App() {
     if (!file) return;
 
     if (!window.XLSX) {
-      alert(
-        "Excel import library is still loading. Please try again in a few seconds.",
-      );
+      alert("Excel import library is still loading. Please try again in a few seconds.");
       return;
     }
 
@@ -512,7 +618,6 @@ export default function App() {
 
       jsonData.forEach((row) => {
         const path = row["Image Path"];
-
         if (path) {
           newExportList[path] = {
             Image: row["Image Name"] || path.split("/").pop(),
@@ -541,7 +646,6 @@ export default function App() {
     }
   };
 
-  // --- RENDER HELPERS ---
   const colsClass =
     viewMode === "Word Level"
       ? "grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-5"
@@ -569,8 +673,9 @@ export default function App() {
               <h1 className="text-xl font-bold flex items-center gap-2 text-slate-800">
                 OCR Validator
               </h1>
-              <p className="text-xs text-slate-500 mt-1">
-                Client-Side SPA Architecture
+              <p className="text-xs text-slate-500 mt-1 flex items-center gap-1">
+                <Zap className="w-3 h-3 text-yellow-500" />
+                Instant Access Enabled
               </p>
             </div>
             <button
@@ -595,36 +700,33 @@ export default function App() {
                   <span className="text-red-400">Not Selected</span>
                 )}
               </h2>
-              <label
-                className={`w-full bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 text-white font-medium py-3 px-4 rounded-xl shadow-sm transition-all flex items-center justify-center gap-2 cursor-pointer ${isScanning ? "opacity-70 pointer-events-none" : ""}`}
-              >
-                {isScanning ? (
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                ) : (
-                  <FolderSearch className="w-5 h-5" />
-                )}
-                {isScanning
-                  ? "Scanning Directory..."
-                  : "Select Workspace Folder"}
-                <input
-                  type="file"
-                  webkitdirectory="true"
-                  directory="true"
-                  multiple
-                  onChange={handleFolderUpload}
-                  className="hidden"
-                />
-              </label>
-              <p className="text-xs text-red-400 leading-relaxed">
+
+              {/* MODERN API BUTTON vs LEGACY FALLBACK */}
+              {supportsFileSystemAccess ? (
+                <button
+                  onClick={handleFastDirectorySelect}
+                  disabled={isScanning}
+                  className={`w-full bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 text-white font-medium py-3 px-4 rounded-xl shadow-sm transition-all flex items-center justify-center gap-2 ${isScanning ? "opacity-70 pointer-events-none" : ""}`}
+                >
+                  {isScanning ? <Loader2 className="w-5 h-5 animate-spin" /> : <FolderSearch className="w-5 h-5" />}
+                  {isScanning ? "Reading Dataset..." : "Select Workspace Folder"}
+                </button>
+              ) : (
+                <label className={`w-full bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 text-white font-medium py-3 px-4 rounded-xl shadow-sm transition-all flex items-center justify-center gap-2 cursor-pointer ${isScanning ? "opacity-70 pointer-events-none" : ""}`}>
+                  {isScanning ? <Loader2 className="w-5 h-5 animate-spin" /> : <FolderSearch className="w-5 h-5" />}
+                  {isScanning ? "Indexing Legacy Fallback..." : "Select Workspace Folder"}
+                  <input type="file" webkitdirectory="true" directory="true" multiple onChange={handleLegacyUpload} className="hidden" />
+                </label>
+              )}
+              
+              <p className="text-xs text-slate-500 leading-relaxed">
                 Select the root folder containing your images and the
-                .tsv/.txt/.json source file.
+                <span className="font-semibold text-slate-700"> .tsv, .txt, .json, or .csv</span> source file.
               </p>
             </div>
 
             {/* Section: Display Configuration */}
-            <div
-              className={`space-y-4 ${!workspaceId && "opacity-50 pointer-events-none"}`}
-            >
+            <div className={`space-y-4 ${!workspaceId && "opacity-50 pointer-events-none"}`}>
               <h2 className="text-xs font-bold text-slate-400 uppercase tracking-wider">
                 Display Configuration
               </h2>
@@ -686,9 +788,7 @@ export default function App() {
             <div className="w-full h-px bg-slate-100"></div>
 
             {/* Section: State & Export */}
-            <div
-              className={`space-y-4 ${!workspaceId && "opacity-50 pointer-events-none"}`}
-            >
+            <div className={`space-y-4 ${!workspaceId && "opacity-50 pointer-events-none"}`}>
               <div className="bg-blue-50 border border-blue-100 p-4 rounded-xl flex items-center justify-between">
                 <div>
                   <p className="text-xs font-bold text-blue-800">
@@ -764,9 +864,7 @@ export default function App() {
         ) : (
           <>
             {/* Top Navigation */}
-            <div
-              className={`bg-white/80 backdrop-blur-md border-b border-slate-200 p-3 sm:p-4 flex items-center justify-between sticky top-0 z-20 transition-all ${!isSidebarOpen ? "pl-16 pr-4 sm:pr-8" : "px-4 sm:px-8"}`}
-            >
+            <div className={`bg-white/80 backdrop-blur-md border-b border-slate-200 p-3 sm:p-4 flex items-center justify-between sticky top-0 z-20 transition-all ${!isSidebarOpen ? "pl-16 pr-4 sm:pr-8" : "px-4 sm:px-8"}`}>
               <button
                 onClick={() => setCurrentPage((p) => Math.max(0, p - 1))}
                 disabled={currentPage === 0}
@@ -830,9 +928,7 @@ export default function App() {
                       }`}
                     >
                       {/* Card Header with Checkbox */}
-                      <div
-                        className={`px-3 py-2 sm:px-4 sm:py-3 border-b border-slate-100 flex items-center justify-between transition-colors ${isFlagged ? "bg-blue-50" : "bg-white"}`}
-                      >
+                      <div className={`px-3 py-2 sm:px-4 sm:py-3 border-b border-slate-100 flex items-center justify-between transition-colors ${isFlagged ? "bg-blue-50" : "bg-white"}`}>
                         <button
                           onClick={() => toggleFlag(item)}
                           className="flex items-center gap-2 sm:gap-2.5 group/btn focus:outline-none"
@@ -857,9 +953,7 @@ export default function App() {
                       </div>
 
                       {/* Image Bounding Box */}
-                      <div
-                        className={`w-full bg-slate-50 border-b border-slate-100 p-3 sm:p-4 flex items-center justify-center ${imgBoxHeight}`}
-                      >
+                      <div className={`w-full bg-slate-50 border-b border-slate-100 p-3 sm:p-4 flex items-center justify-center ${imgBoxHeight}`}>
                         {imgUrl ? (
                           <img
                             src={imgUrl}
@@ -869,8 +963,8 @@ export default function App() {
                         ) : (
                           <div className="flex flex-col items-center text-slate-400 gap-1 sm:gap-2">
                             <AlertCircle className="w-5 h-5 sm:w-6 sm:h-6 opacity-50" />
-                            <span className="text-[10px] sm:text-xs font-medium">
-                              Image Not Found
+                            <span className="text-[10px] sm:text-xs font-medium text-center px-2">
+                              {visibleUrls.hasOwnProperty(item.id) ? "Image Not Found (Check Path)" : "Loading..."}
                             </span>
                           </div>
                         )}
