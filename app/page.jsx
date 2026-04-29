@@ -286,7 +286,7 @@ export default function App() {
     const nameMap = new Map();
     let sourceFile = null;
 
-    const CHUNK_SIZE = 2500;
+    const CHUNK_SIZE = 1000;
     const numFiles = fileList.length;
 
     try {
@@ -671,11 +671,10 @@ export default function App() {
           <div className="p-6 border-b border-slate-100 bg-slate-50/50 flex justify-between items-start">
             <div>
               <h1 className="text-xl font-bold flex items-center gap-2 text-slate-800">
-                OCR Validator
+                OCR Data Validator
               </h1>
               <p className="text-xs text-slate-500 mt-1 flex items-center gap-1">
                 <Zap className="w-3 h-3 text-yellow-500" />
-                Instant Access Enabled
               </p>
             </div>
             <button
@@ -691,7 +690,7 @@ export default function App() {
             {/* Section: Import */}
             <div className="space-y-3">
               <h2 className="text-xs font-bold text-slate-400">
-                Workspace:{" "}
+                Source File:{" "}
                 {workspaceId ? (
                   <span className="text-green-600">
                     {originalFileName || "Dataset Loaded"}
